@@ -1,0 +1,424 @@
+---
+title: "Análisis de Desempleo en América Latina"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+    theme: cerulean
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+# ---- Paquetes ----
+library(dplyr)
+library(plotly)
+library(highcharter)
+library(reactable)
+library(shiny)
+library(tidyr)
+
+# =========================================================================
+# CARGA DE DATOS
+# AJUSTA ESTA RUTA a la ubicación del archivo .csv en tu computador.
+# Si el .Rmd y el .csv están en la misma carpeta, puedes usar solo el
+# nombre del archivo, por ejemplo: "Desempleo_10_paises_America_Latina.csv"
+# =========================================================================
+ruta_datos <- "C:/Users/stefg/OneDrive/Documentos/SEMESTRE 2/PROBABILIDAD Y ESTADÍSTICA/PROYECTO INVES/Desempleo_10_paises_America_Latina.csv"
+
+mis_datos <- read.csv(ruta_datos,
+                      sep = ";", dec = ".",
+                      fileEncoding = "UTF-8",
+                      check.names = FALSE,
+                      stringsAsFactors = FALSE)
+
+# ---- Estandarización robusta de nombres de columnas ----
+# En vez de depender del nombre exacto que R le da a la columna de valores
+# (que puede variar según el encabezado original del csv, p. ej. "Valor (%)"),
+# se detecta automáticamente por coincidencia de texto.
+nombres_originales <- names(mis_datos)
+
+col_pais  <- grep("pa.s", nombres_originales, ignore.case = TRUE, value = TRUE)[1]
+col_anio  <- grep("a.o",  nombres_originales, ignore.case = TRUE, value = TRUE)[1]
+col_sexo  <- grep("sexo", nombres_originales, ignore.case = TRUE, value = TRUE)[1]
+col_valor <- grep("valor", nombres_originales, ignore.case = TRUE, value = TRUE)[1]
+
+names(mis_datos)[names(mis_datos) == col_pais]  <- "Pais"
+names(mis_datos)[names(mis_datos) == col_anio]  <- "Anio"
+names(mis_datos)[names(mis_datos) == col_sexo]  <- "Sexo"
+names(mis_datos)[names(mis_datos) == col_valor] <- "Valor_Original"
+
+# Limpieza de la variable numérica (quita "%" y usa "." como decimal)
+mis_datos$Valor_Limpio <- as.numeric(gsub(",", ".", gsub("%", "", mis_datos$Valor_Original)))
+mis_datos$Anio <- as.numeric(mis_datos$Anio)
+
+# Se descartan filas sin información numérica válida
+mis_datos <- mis_datos %>% filter(!is.na(Valor_Limpio), !is.na(Anio))
+
+# Datos del año más reciente disponible
+anio_max <- max(mis_datos$Anio, na.rm = TRUE)
+anio_min <- min(mis_datos$Anio, na.rm = TRUE)
+datos_ultimo <- mis_datos[mis_datos$Anio == anio_max, ]
+
+# Modelo de regresión lineal global (Valor ~ Año)
+modelo_regresion <- lm(Valor_Limpio ~ Anio, data = mis_datos)
+
+# Promedio histórico por país
+promedios <- aggregate(Valor_Limpio ~ Pais, data = mis_datos, FUN = mean)
+promedios <- promedios[order(-promedios$Valor_Limpio), ]
+
+paises_disponibles <- sort(unique(mis_datos$Pais))
+paises_default <- intersect(
+  c("Argentina", "Brasil", "Chile", "Colombia", "México", "Perú"),
+  paises_disponibles
+)
+if (length(paises_default) == 0) paises_default <- paises_disponibles
+```
+
+# Dashboard interactivo
+
+## Column {.sidebar data-width="280"}
+
+### Filtros
+
+```{r filtros}
+selectInput("paises", "Países:",
+            choices = paises_disponibles,
+            selected = paises_default,
+            multiple = TRUE)
+
+sliderInput("anio", "Año:",
+            min = anio_min,
+            max = anio_max,
+            value = anio_max,
+            step = 1,
+            sep = "")
+```
+
+**Nota metodológica:** los gráficos y tablas de esta página se actualizan de forma reactiva según los países y el año seleccionados (ver sección *Metodología* para el detalle de las técnicas empleadas).
+
+## Column {.tabset data-width="720"}
+
+### Promedio histórico
+
+```{r grafico_promedio}
+renderHighchart({
+  hchart(promedios, "column", hcaes(x = Pais, y = Valor_Limpio)) %>%
+    hc_title(text = "Promedio histórico por país") %>%
+    hc_yAxis(title = list(text = "Tasa de desempleo (%)")) %>%
+    hc_colors(c("#4682B4")) %>%
+    hc_plotOptions(column = list(dataLabels = list(enabled = TRUE, format = '{point.y:.1f}')))
+})
+```
+
+### Evolución temporal
+
+```{r grafico_evolucion}
+renderPlotly({
+  req(input$paises)
+  datos_filtrados <- mis_datos %>%
+    filter(Sexo == "Ambos sexos",
+           Pais %in% input$paises)
+
+  plot_ly(datos_filtrados, x = ~Anio, y = ~Valor_Limpio,
+          color = ~Pais, type = 'scatter', mode = 'lines+markers') %>%
+    layout(title = "Evolución del desempleo",
+           xaxis = list(title = "Año"),
+           yaxis = list(title = "Tasa de desempleo (%)"),
+           hovermode = 'x unified')
+})
+```
+
+### Comparación por sexo
+
+```{r grafico_sexo}
+renderPlotly({
+  req(input$paises)
+  datos_sexo <- mis_datos %>%
+    filter(Anio == input$anio,
+           Sexo %in% c("Hombres", "Mujeres"),
+           Pais %in% input$paises)
+
+  plot_ly(datos_sexo,
+          x = ~Pais,
+          y = ~Valor_Limpio,
+          color = ~Sexo,
+          type = 'bar',
+          colors = c("dodgerblue", "pink"),
+          barmode = 'group') %>%
+    layout(title = paste("Desempleo por sexo en", input$anio),
+           xaxis = list(title = "", tickangle = -45),
+           yaxis = list(title = "Tasa de desempleo (%)"))
+})
+```
+
+### Distribución
+
+```{r grafico_distribucion}
+renderPlotly({
+  req(input$paises)
+  datos_filtrados <- mis_datos %>%
+    filter(Pais %in% input$paises,
+           Anio <= input$anio)
+
+  validate(need(nrow(datos_filtrados) > 1, "No hay suficientes datos para graficar la distribución."))
+
+  hist_data <- hist(datos_filtrados$Valor_Limpio, breaks = 15, plot = FALSE)
+
+  p <- plot_ly(x = hist_data$mids,
+               y = hist_data$counts,
+               type = 'bar',
+               marker = list(color = 'lightblue'),
+               text = ~paste("Frecuencia:", hist_data$counts),
+               hoverinfo = 'text') %>%
+    layout(title = "Distribución de tasas de desempleo",
+           xaxis = list(title = "Tasa de desempleo (%)"),
+           yaxis = list(title = "Frecuencia"))
+
+  media <- mean(datos_filtrados$Valor_Limpio, na.rm = TRUE)
+  mediana <- median(datos_filtrados$Valor_Limpio, na.rm = TRUE)
+
+  if (!is.na(media) && !is.na(mediana)) {
+    p <- p %>%
+      layout(shapes = list(
+        list(type = "line", x0 = media, x1 = media,
+             y0 = 0, y1 = 1, yref = "paper",
+             line = list(color = "red", dash = "dash")),
+        list(type = "line", x0 = mediana, x1 = mediana,
+             y0 = 0, y1 = 1, yref = "paper",
+             line = list(color = "blue", dash = "dash"))
+      )) %>%
+      add_annotations(x = media + 0.5, y = 0.9,
+                      text = "Media", showarrow = FALSE, yref = "paper") %>%
+      add_annotations(x = mediana + 0.5, y = 0.85,
+                      text = "Mediana", showarrow = FALSE, yref = "paper")
+  }
+  p
+})
+```
+
+### Regresión Año-Desempleo
+
+```{r grafico_regresion}
+renderPlotly({
+  req(input$paises)
+  datos_filtrados <- mis_datos %>%
+    filter(Pais %in% input$paises,
+           Anio <= input$anio)
+
+  validate(need(nrow(datos_filtrados) > 2, "No hay suficientes datos para ajustar el modelo."))
+
+  modelo_filtrado <- lm(Valor_Limpio ~ Anio, data = datos_filtrados)
+
+  plot_ly(datos_filtrados,
+          x = ~Anio,
+          y = ~Valor_Limpio,
+          type = 'scatter',
+          mode = 'markers',
+          marker = list(color = 'rgba(0, 0, 255, 0.5)'),
+          text = ~paste("País:", Pais, "<br>Año:", Anio, "<br>Tasa:", round(Valor_Limpio, 2), "%"),
+          hoverinfo = 'text') %>%
+    add_trace(x = ~Anio,
+              y = fitted(modelo_filtrado),
+              type = 'scatter',
+              mode = 'lines',
+              name = 'Regresión',
+              line = list(color = 'red', width = 2)) %>%
+    layout(title = paste("Relación año-desempleo (R² =", round(summary(modelo_filtrado)$r.squared, 3), ")"),
+           xaxis = list(title = "Año"),
+           yaxis = list(title = "Desempleo (%)"))
+})
+```
+
+### Resumen estadístico
+
+```{r resumen_texto}
+renderPrint({
+  req(input$paises)
+  datos_filtrados <- mis_datos %>%
+    filter(Pais %in% input$paises,
+           Anio <= input$anio)
+
+  cat("========== RESUMEN GLOBAL ==========\n")
+  cat("Países seleccionados:", length(unique(datos_filtrados$Pais)), "\n")
+  cat("Rango de años:", min(datos_filtrados$Anio), "-", max(datos_filtrados$Anio), "\n")
+  cat("Media global:", round(mean(datos_filtrados$Valor_Limpio, na.rm = TRUE), 2), "%\n")
+  cat("Mediana global:", round(median(datos_filtrados$Valor_Limpio, na.rm = TRUE), 2), "%\n")
+  cat("Desviación estándar:", round(sd(datos_filtrados$Valor_Limpio, na.rm = TRUE), 2), "%\n")
+  cat("Varianza:", round(var(datos_filtrados$Valor_Limpio, na.rm = TRUE), 2), "\n")
+  cat("Mínimo:", round(min(datos_filtrados$Valor_Limpio, na.rm = TRUE), 2), "%\n")
+  cat("Máximo:", round(max(datos_filtrados$Valor_Limpio, na.rm = TRUE), 2), "%\n")
+})
+```
+
+### Tabla detallada
+
+```{r tabla_detallada}
+renderReactable({
+  req(input$paises)
+  datos_filtrados <- mis_datos %>%
+    filter(Pais %in% input$paises,
+           Anio <= input$anio) %>%
+    group_by(Pais) %>%
+    summarise(
+      Media = mean(Valor_Limpio, na.rm = TRUE),
+      Mediana = median(Valor_Limpio, na.rm = TRUE),
+      Desviacion = sd(Valor_Limpio, na.rm = TRUE),
+      Varianza = var(Valor_Limpio, na.rm = TRUE),
+      Min = min(Valor_Limpio, na.rm = TRUE),
+      Max = max(Valor_Limpio, na.rm = TRUE),
+      n = n()
+    )
+
+  reactable(datos_filtrados,
+            searchable = TRUE,
+            filterable = TRUE,
+            defaultPageSize = 10,
+            columns = list(
+              Media = colDef(format = colFormat(digits = 2)),
+              Desviacion = colDef(format = colFormat(digits = 3)),
+              Varianza = colDef(format = colFormat(digits = 3)),
+              Min = colDef(format = colFormat(digits = 2)),
+              Max = colDef(format = colFormat(digits = 2))
+            ))
+})
+```
+
+# Metodología (6. Análisis de datos)
+
+## Row
+
+### 6. Análisis de datos
+
+**Diseño del estudio**
+
+Este trabajo corresponde a un diseño **observacional, no experimental, de tipo longitudinal-comparativo (panel de datos)**. Se analiza la tasa de desempleo de 10 países de América Latina a lo largo de varios años, sin manipulación de variables por parte de los investigadores; las "variables" de agrupación (país, sexo, año) son factores de clasificación observados y no condiciones asignadas experimentalmente. La unidad de análisis es la observación país-año-sexo, y la variable dependiente es la tasa de desempleo (%).
+
+**Métodos de análisis estadístico**
+
+Se aplicaron las siguientes técnicas, todas ellas implementadas de forma reactiva en el panel *Dashboard interactivo*:
+
+- **Análisis descriptivo:** media, mediana, desviación estándar, varianza, mínimo y máximo de la tasa de desempleo, calculados de forma global y desagregados por país (pestañas *Resumen estadístico* y *Tabla detallada*).
+- **Análisis de distribución:** histograma de frecuencias de la tasa de desempleo, con líneas de referencia para la media y la mediana (pestaña *Distribución*).
+- **Comparación de grupos — prueba t de Student:** se compara la tasa de desempleo entre hombres y mujeres para el año más reciente (`t.test(Valor_Limpio ~ Sexo, ...)`), bajo el supuesto de muestras independientes.
+- **Comparación de grupos — ANOVA de un factor:** se compara la tasa de desempleo promedio entre los países seleccionados (`aov(Valor_Limpio ~ Pais, ...)`), para evaluar si existen diferencias significativas entre al menos dos de ellos.
+- **Análisis de regresión lineal simple:** se modela la tasa de desempleo en función del año (`lm(Valor_Limpio ~ Anio, ...)`) para estimar la tendencia temporal (pendiente, significancia estadística y R²), tanto de forma global como para el subconjunto de países y años filtrados por el usuario.
+- Todas las pruebas de hipótesis se evaluaron con un **nivel de significancia α = 0.05**.
+
+**Software utilizado**
+
+El procesamiento, análisis y visualización de los datos se realizó íntegramente en **R** (entorno RStudio), mediante los siguientes paquetes:
+
+- `dplyr` y `tidyr`: limpieza, filtrado y transformación de datos.
+- `plotly` y `highcharter`: visualización interactiva (líneas, barras, histogramas, dispersión).
+- `reactable`: tablas interactivas y filtrables.
+- `shiny` y `flexdashboard`: construcción del tablero interactivo y manejo de la reactividad (entradas de usuario: país y año).
+
+# Resultados (7)
+
+## Row
+
+### 7. Resultados
+
+Los hallazgos se presentan de manera interactiva en la pestaña *Dashboard interactivo*, e incluyen:
+
+- **Tablas:** resumen estadístico por país (media, mediana, desviación estándar, varianza, mínimo, máximo y número de observaciones) en la pestaña *Tabla detallada*.
+- **Gráficos de barras:** promedio histórico de desempleo por país (*Promedio histórico*) y comparación por sexo (*Comparación por sexo*).
+- **Gráficos de dispersión y líneas:** evolución temporal del desempleo por país (*Evolución temporal*) y relación año-desempleo con la recta de regresión ajustada (*Regresión Año-Desempleo*).
+- **Histograma:** distribución de las tasas de desempleo observadas, con líneas verticales que marcan la media y la mediana (*Distribución*).
+- **Resúmenes estadísticos:** medias, medianas, varianza, desviación estándar y rangos, calculados de forma global (pestaña *Resumen estadístico*) y por país (pestaña *Tabla detallada*).
+
+**Interpretación de resultados**
+
+De acuerdo con el objetivo del estudio —caracterizar el comportamiento del desempleo en América Latina y evaluar diferencias entre países y sexos— los resultados del panel permiten contrastar dos hipótesis generales:
+
+- **H1:** existen diferencias significativas en la tasa de desempleo entre países. Esta hipótesis se evalúa con el ANOVA de la pestaña *Discusión*; un valor p \< 0.05 respalda H1, mientras que un valor p ≥ 0.05 no permite rechazar la hipótesis nula de igualdad de medias.
+- **H2:** existen diferencias significativas en la tasa de desempleo entre hombres y mujeres. Esta hipótesis se evalúa con la prueba t, también en la pestaña *Discusión*.
+
+Adicionalmente, el modelo de regresión lineal permite responder si la tasa de desempleo muestra una **tendencia temporal significativa** (creciente, decreciente o estable) en el período analizado, a partir del signo y la significancia del coeficiente asociado al año.
+
+# Discusión (8)
+
+## Row {data-height="550"}
+
+### Pruebas de hipótesis y tendencia (resultados reactivos)
+
+```{r discusion_pruebas}
+renderPrint({
+  req(input$paises)
+  datos_filtrados <- mis_datos %>%
+    filter(Pais %in% input$paises,
+           Anio <= input$anio)
+
+  cat("========== DISCUSIÓN DE RESULTADOS ==========\n\n")
+
+  # ---- ANOVA entre países ----
+  if (length(unique(datos_filtrados$Pais)) >= 2) {
+    anova_filtrado <- aov(Valor_Limpio ~ Pais, data = datos_filtrados)
+    p_anova <- summary(anova_filtrado)[[1]][["Pr(>F)"]][1]
+    if (p_anova < 0.05) {
+      cat("El ANOVA indica diferencias significativas entre países (p =", round(p_anova, 4), ").\n")
+    } else {
+      cat("El ANOVA no muestra diferencias significativas entre países (p =", round(p_anova, 4), ").\n")
+    }
+  } else {
+    cat("Se necesitan al menos 2 países para ejecutar el ANOVA.\n")
+  }
+
+  # ---- Prueba t por sexo (año más reciente seleccionado) ----
+  datos_sexo <- datos_ultimo %>%
+    filter(Pais %in% input$paises,
+           Sexo %in% c("Hombres", "Mujeres"))
+  if (nrow(datos_sexo) > 2 && length(unique(datos_sexo$Sexo)) == 2) {
+    t_test <- t.test(Valor_Limpio ~ Sexo, data = datos_sexo)
+    if (t_test$p.value < 0.05) {
+      cat("La prueba t muestra diferencias significativas entre sexos (p =", round(t_test$p.value, 4), ").\n")
+    } else {
+      cat("No se encontraron diferencias significativas entre sexos (p =", round(t_test$p.value, 4), ").\n")
+    }
+  } else {
+    cat("No hay suficientes datos por sexo para ejecutar la prueba t.\n")
+  }
+
+  # ---- Tendencia temporal (regresión) ----
+  if (nrow(datos_filtrados) > 2) {
+    modelo_filtrado <- lm(Valor_Limpio ~ Anio, data = datos_filtrados)
+    p_reg <- summary(modelo_filtrado)$coefficients["Anio", "Pr(>|t|)"]
+    coef_anio <- summary(modelo_filtrado)$coefficients["Anio", "Estimate"]
+    if (p_reg < 0.05) {
+      if (coef_anio > 0) {
+        cat("Tendencia creciente significativa (pendiente =", round(coef_anio, 3), ", p =", round(p_reg, 4), ").\n")
+      } else {
+        cat("Tendencia decreciente significativa (pendiente =", round(coef_anio, 3), ", p =", round(p_reg, 4), ").\n")
+      }
+    } else {
+      cat("No se encontró tendencia temporal significativa (p =", round(p_reg, 4), ").\n")
+    }
+  } else {
+    cat("No hay suficientes datos para ajustar el modelo de regresión.\n")
+  }
+})
+```
+
+## Row {data-height="450"}
+
+### 8. Discusión
+
+**Comparación con estudios previos**
+
+Los resultados de tendencia y de diferencias entre países obtenidos aquí deben contrastarse con las cifras oficiales publicadas por organismos como la **OIT (Organización Internacional del Trabajo)**, la **CEPAL** y los institutos nacionales de estadística de cada país, ya que estas fuentes suelen reportar metodologías de medición del desempleo ligeramente distintas (por ejemplo, definición de población económicamente activa, tasas ajustadas estacionalmente, etc.). Se recomienda citar aquí, de forma específica, los estudios previos consultados en el marco teórico del proyecto y contrastar si la tendencia y las diferencias entre países encontradas coinciden con lo reportado en la literatura.
+
+**Posibles explicaciones de los hallazgos**
+
+- Las diferencias de desempleo entre países pueden estar asociadas a factores estructurales de cada economía (composición del PIB, peso del sector informal, políticas laborales, etc.) que no fueron incluidos como variables en este análisis.
+- Las diferencias por sexo observadas pueden reflejar brechas de participación laboral y de acceso al empleo formal históricamente documentadas en la región.
+- Una tendencia temporal significativa puede estar influenciada por eventos macroeconómicos puntuales (crisis financieras, la pandemia de COVID-19, procesos de recuperación económica) más que por un cambio estructural sostenido.
+
+**Limitaciones del estudio**
+
+- Los datos disponibles llegan hasta el año `r anio_max` y no incluyen a todos los países de la región, por lo que los resultados no son generalizables al conjunto de América Latina.
+- Pueden existir cambios metodológicos en la forma de medir el desempleo entre países y a lo largo del tiempo, lo que dificulta la comparabilidad directa de las cifras.
+- No se incorporaron variables macroeconómicas de control (inflación, PIB, informalidad laboral), que podrían explicar parte de la variabilidad observada.
+- El diseño es **observacional**, por lo que los resultados permiten identificar asociaciones y tendencias, pero **no relaciones causales**.
+- El tamaño de muestra por país y año puede ser reducido en algunos casos, lo que limita la potencia estadística de las pruebas t y ANOVA.
